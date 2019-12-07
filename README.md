@@ -24,5 +24,3 @@ Project utilizing OpenCV and CUDA to detect lanes using the Hough Transform.
 	2. Go to View -> Other Windows -> Property Manager. (May need to turn on expert settings.)
 	3. Click the Add Existing Project Property Sheet icon in Property Manager and add the downloaded property sheet.
   3. Run test program openCV_Cuda_TestProgram.cpp to test and check linking
-
-  
