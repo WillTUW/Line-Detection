@@ -11,5 +11,9 @@ int main()
 	cv::namedWindow("image", cv::WINDOW_NORMAL);
 	imshow("image", img);
 	cv::waitKey(0);
+	/// <summary>
+	/// ////////////
+	/// </summary>
+	/// <returns></returns>
 	return 0;
 }
