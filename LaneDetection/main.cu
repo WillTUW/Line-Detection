@@ -10,92 +10,220 @@
 #include <algorithm>
 #include <list>
 
-struct HoughTransformComparer
+#define M_PI 3.14159265359
+
+void HoughLinesProbabilistic(cv::Mat& image, float rho, float theta, int threshold, int lineLength, int lineGap,
+	std::vector<cv::Vec4i>& lines, int linesMax)
 {
-	HoughTransformComparer(cv::Mat& _aux, int _diag) : aux(_aux), diag(_diag) {}
+	cv::Point pt;
+	float irho = 1 / rho;
+	cv::RNG rng((uint64)-1);
 
-	inline bool operator()(int l1, int l2) const
+	CV_Assert(image.type() == CV_8UC1);
+
+	int width = image.cols;
+	int height = image.rows;
+
+	int numangle = cvRound(CV_PI / theta);
+	int numrho = cvRound(((width + height) * 2 + 1) / rho);
+
+	cv::Mat accum = cv::Mat::zeros(numangle, numrho, CV_32SC1);
+	cv::Mat mask(height, width, CV_8UC1);
+	std::vector<float> trigtab(numangle * 2);
+
+	for (int n = 0; n < numangle; n++)
 	{
-		int x1 = l1 % diag;
-		int y1 = l1 / diag;
-		int x2 = l2 % diag;
-		int y2 = l2 / diag;
-		return aux.at<int>(y1, x1) > aux.at<int>(y2, x2) || (aux.at<int>(y1, x1) == aux.at<int>(y2, x2) && l1 < l2);
-	}
-	cv::Mat& aux;
-	const int diag;
-};
-
-double *CreateThetas(int startDeg, int stopDeg)
-{
-	int count = stopDeg - startDeg;
-	double* thetas = new double[count];
-	for (int i = 0; i < count; i++)
-	{
-		thetas[i] = (startDeg + i) * (3.14159265359 / 180.0);
-	}
-
-	return thetas;
-}
-
-double *CreateLinspace(int start, int stop, int count)
-{
-	double step = (stop - start) / (double)count;
-	double* linspace = new double[count];
-	for (int i = 0; i < count; i++)
-	{
-		linspace[i] = start + (i * step);
+		trigtab[n * 2] = (float)(cos((double)n*theta) * irho);
+		trigtab[n * 2 + 1] = (float)(sin((double)n*theta) * irho);
 	}
 
-	return linspace;
-}
+	const float* ttab = &trigtab[0];
+	uchar* mdata0 = mask.ptr();
+	std::vector<cv::Point> nzloc;
 
-void FillAccumulatorMatrix(cv::Mat img, cv::Mat &accumulator, double *thetas, int df, double threshold)
-{
-	int width = img.cols;
-	int height = img.rows;
-	int diagonalLength = (int)round(sqrt(width * width + height * height));
-
-	int accumulatorSize = 2 * diagonalLength * df;
-	for (int y = 0; y < height; y++)
+	// stage 1. collect non-zero image points
+	for (pt.y = 0; pt.y < height; pt.y++)
 	{
-		for (int x = 0; x < width; x++)
+		const uchar* data = image.ptr(pt.y);
+		uchar* mdata = mask.ptr(pt.y);
+		for (pt.x = 0; pt.x < width; pt.x++)
 		{
-			uchar val = img.at<uchar>(y, x);
-			if (val > 5 / 255.0)
+			if (data[pt.x])
 			{
-				int xx = x + 1;
-				int yy = y + 1;
-				for (int t = 0; t < df; t++)
-				{
-
-					int rho = diagonalLength + (int)round(xx * cos(thetas[t]) + yy * sin(thetas[t]));
-					accumulator.at<int>(rho, t) += 1;
-				}
+				mdata[pt.x] = (uchar)1;
+				nzloc.push_back(pt);
 			}
+			else
+				mdata[pt.x] = 0;
 		}
 	}
-}
 
-void FindLocalMaximums(int numrho, int numangle, int threshold, cv::Mat &accumulator, std::vector<int>& sortBuffer)
-{
-	for (int r = 1; r < numrho - 1; r++)
+	int count = (int)nzloc.size();
+
+	// stage 2. process all the points in random order
+	for (; count > 0; count--)
 	{
-		for (int n = 1; n < numangle - 1; n++)
+		// choose random point out of the remaining ones
+		int idx = rng.uniform(0, count);
+		int max_val = threshold - 1, max_n = 0;
+		cv::Point point = nzloc[idx];
+		cv::Point line_end[2];
+		float a, b;
+		int* adata = accum.ptr<int>();
+		int i = point.y, j = point.x, k, x0, y0, dx0, dy0, xflag;
+		int good_line;
+		const int shift = 16;
+
+		// "remove" it by overriding it with the last element
+		nzloc[idx] = nzloc[count - 1];
+
+		// check if it has been excluded already (i.e. belongs to some other line)
+		if (!mdata0[i*width + j])
+			continue;
+
+		// update accumulator, find the most probable line
+		for (int n = 0; n < numangle; n++, adata += numrho)
 		{
-			int value = accumulator.at<int>(r, n);
-
-			int south = accumulator.at<int>(r, n - 1);
-			int north = accumulator.at<int>(r, n + 1);
-			int west = accumulator.at<int>(r - 1, n);
-			int east = accumulator.at<int>(r + 1, n);
-
-			if (value > threshold &&
-				value > west && value > east &&
-				value > north && value >= south)
+			int r = cvRound(j * ttab[n * 2] + i * ttab[n * 2 + 1]);
+			r += (numrho - 1) / 2;
+			int val = ++adata[r];
+			if (max_val < val)
 			{
-				sortBuffer.push_back(r * numrho + n);
+				max_val = val;
+				max_n = n;
 			}
+		}
+
+		// if it is too "weak" candidate, continue with another point
+		if (max_val < threshold)
+			continue;
+
+		// from the current point walk in each direction
+		// along the found line and extract the line segment
+		a = -ttab[max_n * 2 + 1];
+		b = ttab[max_n * 2];
+		x0 = j;
+		y0 = i;
+		if (fabs(a) > fabs(b))
+		{
+			xflag = 1;
+			dx0 = a > 0 ? 1 : -1;
+			dy0 = cvRound(b*(1 << shift) / fabs(a));
+			y0 = (y0 << shift) + (1 << (shift - 1));
+		}
+		else
+		{
+			xflag = 0;
+			dy0 = b > 0 ? 1 : -1;
+			dx0 = cvRound(a*(1 << shift) / fabs(b));
+			x0 = (x0 << shift) + (1 << (shift - 1));
+		}
+
+		for (k = 0; k < 2; k++)
+		{
+			int gap = 0, x = x0, y = y0, dx = dx0, dy = dy0;
+
+			if (k > 0)
+				dx = -dx, dy = -dy;
+
+			// walk along the line using fixed-point arithmetic,
+			// stop at the image border or in case of too big gap
+			for (;; x += dx, y += dy)
+			{
+				uchar* mdata;
+				int i1, j1;
+
+				if (xflag)
+				{
+					j1 = x;
+					i1 = y >> shift;
+				}
+				else
+				{
+					j1 = x >> shift;
+					i1 = y;
+				}
+
+				if (j1 < 0 || j1 >= width || i1 < 0 || i1 >= height)
+					break;
+
+				mdata = mdata0 + i1 * width + j1;
+
+				// for each non-zero point:
+				//    update line end,
+				//    clear the mask element
+				//    reset the gap
+				if (*mdata)
+				{
+					gap = 0;
+					line_end[k].y = i1;
+					line_end[k].x = j1;
+				}
+				else if (++gap > lineGap)
+					break;
+			}
+		}
+
+		good_line = std::abs(line_end[1].x - line_end[0].x) >= lineLength ||
+			std::abs(line_end[1].y - line_end[0].y) >= lineLength;
+
+		for (k = 0; k < 2; k++)
+		{
+			int x = x0, y = y0, dx = dx0, dy = dy0;
+
+			if (k > 0)
+				dx = -dx, dy = -dy;
+
+			// walk along the line using fixed-point arithmetic,
+			// stop at the image border or in case of too big gap
+			for (;; x += dx, y += dy)
+			{
+				uchar* mdata;
+				int i1, j1;
+
+				if (xflag)
+				{
+					j1 = x;
+					i1 = y >> shift;
+				}
+				else
+				{
+					j1 = x >> shift;
+					i1 = y;
+				}
+
+				mdata = mdata0 + i1 * width + j1;
+
+				// for each non-zero point:
+				//    update line end,
+				//    clear the mask element
+				//    reset the gap
+				if (*mdata)
+				{
+					if (good_line)
+					{
+						adata = accum.ptr<int>();
+						for (int n = 0; n < numangle; n++, adata += numrho)
+						{
+							int r = cvRound(j1 * ttab[n * 2] + i1 * ttab[n * 2 + 1]);
+							r += (numrho - 1) / 2;
+							adata[r]--;
+						}
+					}
+					*mdata = 0;
+				}
+
+				if (i1 == line_end[k].y && j1 == line_end[k].x)
+					break;
+			}
+		}
+
+		if (good_line)
+		{
+			cv::Vec4i lr(line_end[0].x, line_end[0].y, line_end[1].x, line_end[1].y);
+			lines.push_back(lr);
+			if ((int)lines.size() >= linesMax)
+				return;
 		}
 	}
 }
@@ -103,10 +231,10 @@ void FindLocalMaximums(int numrho, int numangle, int threshold, cv::Mat &accumul
 int main()
 {
 	const int ddepth = CV_16S;
-	const int ksize = 3;
+	const int ksize = 1;
 	const bool detectWhiteLines = true;
 
-	cv::Mat srcImage = cv::imread("whiteline.png");
+	cv::Mat srcImage = cv::imread("test.png");
 	if (srcImage.empty())
 	{
 		return EXIT_FAILURE;
@@ -125,27 +253,22 @@ int main()
 	cvtColor(srcBlurred, srcGray, cv::COLOR_BGR2GRAY);
 
 	// Run sobel edge detection
-	// cv::Mat grad_x, grad_y;
-	// Sobel(srcGray, grad_x, ddepth, 1, 0, ksize, cv::BORDER_DEFAULT);
-	// Sobel(srcGray, grad_y, ddepth, 0, 1, ksize, cv::BORDER_DEFAULT);
+	cv::Mat grad_x, grad_y;
+	cv::Sobel(srcGray, grad_x, ddepth, 1, 0, ksize, cv::BORDER_DEFAULT);
+	cv::Sobel(srcGray, grad_y, ddepth, 0, 1, ksize, cv::BORDER_DEFAULT);
 
-	// stage 1. fill accumulator
-	double *thetas = CreateThetas(-90, 90);
-	double *rhos = CreateLinspace(-diagonalLength, diagonalLength, diagonalLength * 2);
-	cv::Mat accumulator = cv::Mat::zeros(2 * diagonalLength, 180, cv::DataType<int>::type);
-	FillAccumulatorMatrix(srcGray, accumulator, thetas, 180, 0.5);
-	cv::imwrite("acc.png", accumulator);
+	// Run canny edge detection
+	cv::Mat canny;
+	cv::Canny(grad_x, grad_y, canny, 100, 150);
+	cv::imwrite("canny.png", canny);
 
-	// stage 2. find local maximums
-	std::vector<int> maximums = std::vector<int>();
-	FindLocalMaximums(diagonalLength, 180, 5, accumulator, maximums);
+	std::vector<cv::Vec4i> lines;
+	HoughLinesProbabilistic(canny, 1, CV_PI / 180, 80, 200, 150, lines, 10);
 
-	// stage 3. sort the detected lines by accumulator value
-	std::sort(maximums.begin(), maximums.end(), HoughTransformComparer(accumulator, diagonalLength));
+	for (int k = 0; k < lines.size(); k++)
+	{
+		cv::line(srcImage, cv::Point(lines[k][0], lines[k][1]), cv::Point(lines[k][2], lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+	}
 
-	// stage 4. store the first min(total,linesMax) lines to the output buffer
-
-
-	delete[] thetas;
-	delete[] rhos;
+	cv::imwrite("detected.png", srcImage);
 }
