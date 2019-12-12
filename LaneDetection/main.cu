@@ -14,92 +14,7 @@
 #include <vector>
 #include <algorithm>
 #include <list>
-
-#define SHIFT 16
-#define M_PI 3.14159265359
-#define M_THETA (M_PI / 180)
-#define RHO 1.0
-#define IRHO (1 / RHO)
-#define hough_cos(x) (cos(x * M_THETA) * IRHO)
-#define hough_sin(x) (sin(x * M_THETA) * IRHO)
-#define NUM_ANGLE 180
-
-//Can you use functions in cuda? Like round?
-__global__ void GPU_UpdateAccumulator(int i, int j, int numrho, int* adata, int* max_val, int* max_n)
-{
-	// update accumulator, find the most probable line
-	//for (int n = 0; n < NUM_ANGLE; n++, adata += numrho)
-	int n = threadIdx.x;
-	if (n >= NUM_ANGLE)
-	{
-		//wot
-		return; //No no you right we want to use return to get out of this func :thumbsup:
-	}
-
-	__shared__ int smax_val[NUM_ANGLE];
-	__shared__ int smax_n[NUM_ANGLE];
-
-	int r = round(j * hough_cos(n) + i * hough_sin(n));
-	r += (numrho - 1) / 2;
-
-	int val = ++adata[r + (n * numrho)]; //Affects this line
-
-	smax_val[n] = val;
-	smax_n[n] = n;
-	__syncthreads();
-	
-	for (int s = 1; s < NUM_ANGLE; s *= 2)
-	{
-		int index = (2 * s) * n; // Next
-		if (index < NUM_ANGLE) 
-		{
-			if (smax_val[index + s] > smax_val[index])
-			{
-				smax_val[index] = smax_val[index + s];
-				smax_n[index] = smax_n[index + s];
-			}
-		}
-
-		__syncthreads();
-	}
-
-	if (n == 0)
-	{
-		*max_val = smax_val[0];
-		*max_n = smax_n[0];
-	}
-}
-
-void UpdateAccumulator(int i, int j, int numrho, int* adata, int *max_val, int *max_n)
-{
-	int host_max_val[1];
-	int host_max_n[1];
-
-	int* dev_adata;
-	int* dev_max_val;
-	int* dev_max_n;
-
-	cudaMalloc((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(int));
-	cudaMalloc((void**)&dev_max_val, 1 * sizeof(int));
-	cudaMalloc((void**)&dev_max_n, 1 * sizeof(int));
-
-	// Copy input vectors from host memory to GPU buffers.
-	cudaMemcpy(dev_adata, adata, NUM_ANGLE * numrho * sizeof(int), cudaMemcpyHostToDevice);
-
-	GPU_UpdateAccumulator <<< 1, NUM_ANGLE >>> (i, j, numrho, dev_adata, dev_max_val, dev_max_n);
-
-	cudaDeviceSynchronize();
-
-	cudaMemcpy(host_max_val, dev_max_val, 1 * sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(host_max_n, dev_max_n, 1 * sizeof(int), cudaMemcpyDeviceToHost);
-
-	cudaFree(dev_adata);
-	cudaFree(dev_max_val);
-	cudaFree(dev_max_n);
-
-	*max_val = host_max_val[0];
-	*max_n = host_max_n[0];
-}
+#include "acc.cuh"
 
 void HoughLinesProbabilistic(cv::Mat& image, int threshold, int lineLength, int lineGap, std::vector<cv::Vec4i>& lines, int linesMax)
 {
@@ -139,20 +54,19 @@ void HoughLinesProbabilistic(cv::Mat& image, int threshold, int lineLength, int 
 	}
 
 	int count = (int)nzloc.size();
+	int* adata = accum.ptr<int>();
 
 	// stage 2. process all the points in random order
 	for (; count > 0; count--)
 	{
 		// choose random point out of the remaining ones
 		int idx = rng.uniform(0, count);
-		int max_val = threshold - 1;
-		int max_n = 0;
+
 		cv::Point point = nzloc[idx];
 		cv::Point line_end[2];
-		float a, b;
-		int* adata = accum.ptr<int>();
+	
 		int i = point.y, j = point.x;
-		int k, x0, y0, dx0, dy0;
+		int k, dx0, dy0;
 		bool xflag, good_line;
 
 		// "remove" it by overriding it with the last element
@@ -162,15 +76,25 @@ void HoughLinesProbabilistic(cv::Mat& image, int threshold, int lineLength, int 
 		if (!mdata0[i*width + j])
 			continue;
 
-		// update accumulator, find the most probable line
-		UpdateAccumulator(i, j, numrho, adata, &max_val, &max_n);
+		int max_n = 0;
+		int max_val = threshold - 1;
 
-		//for (int n = 0; n < NUM_ANGLE; n++, adata += numrho)
+		// update accumulator, find the most probable line
+		int loc_max = 0;
+		int loc_maxn = 0;
+		UpdateAccumulator(i, j, numrho, adata, &loc_max, &loc_maxn);
+		if (loc_max > max_val)
+		{
+			max_val = loc_max;
+			max_n = loc_maxn;
+		}
+
+		//for (int n = 0; n < NUM_ANGLE; n++)
 		//{
 		//	int r = cvRound(j * hough_cos(n) + i * hough_sin(n));
 		//	r += (numrho - 1) / 2;
-		//	int val = ++adata[r];
-		//	if (max_val < val)
+		//	int val = ++adata[r + (n * numrho)];
+		//	if (val > max_val)
 		//	{
 		//		max_val = val;
 		//		max_n = n;
@@ -183,10 +107,10 @@ void HoughLinesProbabilistic(cv::Mat& image, int threshold, int lineLength, int 
 
 		// from the current point walk in each direction
 		// along the found line and extract the line segment
-		a = -sin(max_n * M_THETA) * IRHO;
-		b = cos(max_n * M_THETA) * IRHO;
-		x0 = j;
-		y0 = i;
+		float a = -sin(max_n * M_THETA) * IRHO;
+		float b = cos(max_n * M_THETA) * IRHO;
+		int x0 = j;
+		int y0 = i;
 		if (fabs(a) > fabs(b))
 		{
 			xflag = true;
@@ -286,12 +210,11 @@ void HoughLinesProbabilistic(cv::Mat& image, int threshold, int lineLength, int 
 				{
 					if (good_line)
 					{
-						adata = accum.ptr<int>();
-						for (int n = 0; n < NUM_ANGLE; n++, adata += numrho)
+						for (int n = 0; n < NUM_ANGLE; n++)
 						{
 							int r = cvRound(j1 * hough_cos(n) + i1 * hough_sin(n));
 							r += (numrho - 1) / 2;
-							adata[r]--;
+							adata[r + (n * numrho)]--;
 						}
 					}
 					*mdata = 0;
