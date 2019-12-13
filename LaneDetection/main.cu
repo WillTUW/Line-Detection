@@ -25,32 +25,30 @@ constexpr auto RHO = 1.0;
 #define hough_sin(x) (sin(x * M_THETA) * IRHO)
 constexpr auto NUM_ANGLE = 180;
 
-__global__ void GPU_UpdateAccumulatorAll(int count, int *queueX, int *queueY, int numrho, short* adata, int* max_val, int* max_n)
+__global__ void GPU_UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, short* max_val, short* max_n)
 {
 	// update accumulator, find the most probable line
-	int point = blockIdx.x;
+	const int point = blockIdx.x;
 	if (point >= count)
 	{
 		return;
 	}
 
-	int j = queueX[point];
-	int i = queueY[point];
+	const int j = queueXY[point] >> 16;
+	const int i = queueXY[point] & 0xFFFF;
 
-	int n = threadIdx.x;
+	const int n = threadIdx.x;
 	if (n >= NUM_ANGLE)
 	{
 		//wot
 		return; //No no you right we want to use return to get out of this func :thumbsup:
 	}
 
-	__shared__ int smax_val[NUM_ANGLE];
-	__shared__ int smax_n[NUM_ANGLE];
+	__shared__ short smax_val[NUM_ANGLE];
+	__shared__ short smax_n[NUM_ANGLE];
 
 	int r = round(j * hough_cos(n) + i * hough_sin(n)) + ((numrho - 1) / 2);
-
-	adata[r + (n * numrho)] += 1;
-	int val = adata[r + (n * numrho)];
+	int val = ++adata[r + (n * numrho)];
 
 	smax_val[n] = val;
 	smax_n[n] = n;
@@ -78,38 +76,90 @@ __global__ void GPU_UpdateAccumulatorAll(int count, int *queueX, int *queueY, in
 	}
 }
 
-void UpdateAccumulatorAll(int count, int *queueX, int *queueY, int numrho, short* adata, int* max_val, int* max_n)
+void _UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, short* max_val, short* max_n)
 {
-	int* dev_queuex;
-	int* dev_queuey;
+	int* dev_queuexy;
 	short* dev_adata;
-	int* dev_max_val;
-	int* dev_max_n;
+	short* dev_max_val;
+	short* dev_max_n;
 
 	cudaMalloc((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
-	cudaMalloc((void**)&dev_queuex, count * sizeof(int));
-	cudaMalloc((void**)&dev_queuey, count * sizeof(int));
-	cudaMalloc((void**)&dev_max_val, count * sizeof(int));
-	cudaMalloc((void**)&dev_max_n, count * sizeof(int));
+	cudaMalloc((void**)&dev_queuexy, count * sizeof(int));
+	cudaMalloc((void**)&dev_max_val, count * sizeof(short));
+	cudaMalloc((void**)&dev_max_n, count * sizeof(short));
 
 	// Copy input vectors from host memory to GPU buffers.
 	cudaMemcpy(dev_adata, adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyHostToDevice);
-	cudaMemcpy(dev_queuex, queueX, count * sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(dev_queuey, queueY, count * sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(dev_queuexy, queueXY, count * sizeof(int), cudaMemcpyHostToDevice);
 
-	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE >>> (count, dev_queuex, dev_queuey, numrho, dev_adata, dev_max_val, dev_max_n);
+	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE >>> (count, dev_queuexy, numrho, dev_adata, dev_max_val, dev_max_n);
 
 	cudaDeviceSynchronize();
 
 	cudaMemcpy(adata, dev_adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyDeviceToHost);
-	cudaMemcpy(max_val, dev_max_val, count * sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(max_n, dev_max_n, count * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(max_val, dev_max_val, count * sizeof(short), cudaMemcpyDeviceToHost);
+	cudaMemcpy(max_n, dev_max_n, count * sizeof(short), cudaMemcpyDeviceToHost);
 
-	cudaFree(dev_queuex);
-	cudaFree(dev_queuey);
+	cudaFree(dev_queuexy);
 	cudaFree(dev_adata);
 	cudaFree(dev_max_val);
 	cudaFree(dev_max_n);
+}
+
+void UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, short* max_val, short* max_n)
+{
+	// create streams, one for 
+	cudaStream_t stream1, stream2;
+	cudaStreamCreate(&stream1);
+	cudaStreamCreate(&stream2);
+
+	// create event; used for sync
+	cudaEvent_t cuEvent;
+	cudaEventCreate(&cuEvent);
+	//*/
+
+	int* dev_queuexy;
+	short* dev_adata;
+	short* dev_max_val;
+	short* dev_max_n;
+
+	// allocate memory on device
+	cudaMalloc((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
+	cudaMalloc((void**)&dev_queuexy, count * sizeof(int));
+	cudaMalloc((void**)&dev_max_val, count * sizeof(short));
+	cudaMalloc((void**)&dev_max_n, count * sizeof(short));
+
+	// pin memory on host side
+	cudaMallocHost((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
+	cudaMallocHost((void**)&dev_queuexy, count * sizeof(int));
+	cudaMallocHost((void**)&dev_max_val, count * sizeof(short));
+	cudaMallocHost((void**)&dev_max_n, count * sizeof(short));
+
+	// Async mem copy
+	cudaMemcpyAsync(dev_adata, adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyHostToDevice, stream1);
+	cudaMemcpyAsync(dev_queuexy, queueXY, count * sizeof(int), cudaMemcpyHostToDevice, stream1);
+
+	// sync point
+	cudaEventRecord(cuEvent, stream1); // record event
+	cudaStreamWaitEvent(stream2, cuEvent, 0); // wait for event in stream1
+
+	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE, 1, stream2 >>> (count, dev_queuexy, numrho, dev_adata, dev_max_val, dev_max_n);
+
+	cudaMemcpyAsync(adata, dev_adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyDeviceToHost, stream1);
+	cudaMemcpyAsync(max_val, dev_max_val, count * sizeof(int), cudaMemcpyDeviceToHost, stream1);
+	cudaMemcpyAsync(max_n, dev_max_n, count * sizeof(int), cudaMemcpyDeviceToHost, stream1);
+
+	cudaFree(dev_queuexy);
+	cudaFree(dev_adata);
+	cudaFree(dev_max_val);
+	cudaFree(dev_max_n);
+
+	// destroy streams
+	cudaStreamDestroy(stream1);
+	cudaStreamDestroy(stream2);
+
+	// destory cuda Event
+	cudaEventDestroy(cuEvent);
 }
 
 void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, std::vector<cv::Vec4i>& lines, int linesMax)
@@ -128,7 +178,7 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 	cv::Mat mask(height, width, CV_8UC1);
 
 	uchar* mdata0 = mask.ptr();
-	std::vector<int> nzlocX, nzlocY;
+	std::vector<int> nzlocXY;
 
 	// stage 1. collect non-zero image points
 	for (pt.y = 0; pt.y < height; pt.y++)
@@ -140,8 +190,7 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 			if (data[pt.x])
 			{
 				mdata[pt.x] = (uchar)1;
-				nzlocX.push_back(pt.x);
-				nzlocY.push_back(pt.y);
+				nzlocXY.push_back(pt.x << 16 | pt.y);
 			}
 			else
 			{
@@ -150,17 +199,17 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 		}
 	}
 
-	int count = (int)nzlocX.size();
+	int count = (int)nzlocXY.size();
 	short* adata = accum.ptr<short>();
 
 	short* dev_adata;
-	int* dev_max_val;
-	int* dev_max_n;
+	short* dev_max_val;
+	short* dev_max_n;
 
 	// stage 2. accumulator area
-	int* maxNs = new int[count];
-	int* maxVals = new int[count];
-	UpdateAccumulatorAll(count, &nzlocX[0], &nzlocY[0], numrho, adata, maxVals, maxNs);
+	short* maxNs = new short[count];
+	short* maxVals = new short[count];
+	UpdateAccumulatorAll(count, &nzlocXY[0], numrho, adata, maxVals, maxNs);
 
 	// stage 2. process all the points in random order
 	for (; count > 0; count--)
@@ -168,7 +217,7 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 		// choose random point out of the remaining ones
 		int idx = rng.uniform(0, count);
 
-		cv::Point point = cv::Point(nzlocX[idx], nzlocY[idx]);
+		cv::Point point = cv::Point(nzlocXY[idx] >> 16, nzlocXY[idx] & 0xFFFF);
 		cv::Point line_end[2];
 
 		int i = point.y, j = point.x;
@@ -176,8 +225,7 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 		bool xflag, good_line;
 
 		// "remove" it by overriding it with the last element
-		nzlocX[idx] = nzlocX[count - 1];
-		nzlocY[idx] = nzlocY[count - 1];
+		nzlocXY[idx] = nzlocXY[count - 1];
 
 		// check if it has been excluded already (i.e. belongs to some other line)
 		if (!mdata0[i*width + j])
@@ -558,6 +606,7 @@ int main()
 	// Run probabilistic hough line detection
 	auto start = std::chrono::high_resolution_clock::now();
 
+	//
 	std::vector<cv::Vec4i> lines;
 	HoughLines_GPU(canny, 80, 200, 10, lines, 10);
 
