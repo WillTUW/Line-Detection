@@ -160,40 +160,7 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 	// stage 2. accumulator area
 	int* maxNs = new int[count];
 	int* maxVals = new int[count];
-
 	UpdateAccumulatorAll(count, &nzlocX[0], &nzlocY[0], numrho, adata, maxVals, maxNs);
-
-	//for (int z = 0; z < count; z++)
-	//{
-	//	// update accumulator, find the most probable line
-	//	maxVals[z] = threshold - 1;
-	//	int max_n = 0;
-	//	int i = nzlocY[z];
-	//	int j = nzlocX[z];
-
-	//	// ---- CPU ----
-	//	//for (int n = 0; n < NUM_ANGLE; n++)
-	//	//{
-	//	//	int r = cvRound(j * hough_cos(n) + i * hough_sin(n));
-	//	//	r += (numrho - 1) / 2;
-	//	//	int val = ++adata[r + (n * numrho)];
-	//	//	if (val > maxVals[z])
-	//	//	{
-	//	//		maxVals[z] = val;
-	//	//		maxNs[z] = n;
-	//	//	}
-	//	//}
-
-	//	int loc_max = 0;
-	//	int loc_maxn = 0;
-	//	UpdateAccumulator(i, j, numrho, dev_adata, dev_max_val, dev_max_n,
-	//		adata, &loc_max, &loc_maxn, cuEvent, stream1, stream2);
-	//	if (loc_max > maxVals[z])
-	//	{
-	//		maxVals[z] = loc_max;
-	//		maxNs[z] = loc_maxn;
-	//	}
-	//}
 
 	// stage 2. process all the points in random order
 	for (; count > 0; count--)
