@@ -25,32 +25,30 @@ constexpr auto RHO = 1.0;
 #define hough_sin(x) (sin(x * M_THETA) * IRHO)
 constexpr auto NUM_ANGLE = 180;
 
-__global__ void GPU_UpdateAccumulatorAll(int count, int *queueX, int *queueY, int numrho, short* adata, int* max_val, int* max_n)
+__global__ void GPU_UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, short* max_val, short* max_n)
 {
 	// update accumulator, find the most probable line
-	int point = blockIdx.x;
+	const int point = blockIdx.x;
 	if (point >= count)
 	{
 		return;
 	}
 
-	int j = queueX[point];
-	int i = queueY[point];
+	const int j = queueXY[point] >> 16;
+	const int i = queueXY[point] & 0xFFFF;
 
-	int n = threadIdx.x;
+	const int n = threadIdx.x;
 	if (n >= NUM_ANGLE)
 	{
 		//wot
 		return; //No no you right we want to use return to get out of this func :thumbsup:
 	}
 
-	__shared__ int smax_val[NUM_ANGLE];
-	__shared__ int smax_n[NUM_ANGLE];
+	__shared__ short smax_val[NUM_ANGLE];
+	__shared__ short smax_n[NUM_ANGLE];
 
 	int r = round(j * hough_cos(n) + i * hough_sin(n)) + ((numrho - 1) / 2);
-
-	adata[r + (n * numrho)] += 1;
-	int val = adata[r + (n * numrho)];
+	int val = ++adata[r + (n * numrho)];
 
 	smax_val[n] = val;
 	smax_n[n] = n;
@@ -78,92 +76,64 @@ __global__ void GPU_UpdateAccumulatorAll(int count, int *queueX, int *queueY, in
 	}
 }
 
-void UpdateAccumulatorAll(int count, int *queueX, int *queueY, int numrho, short* adata, int* max_val, int* max_n)
+void UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, short* max_val, short* max_n)
 {
-	//*
-	// create streams, one for 
-	cudaStream_t stream1, stream2;
-	cudaStreamCreate(&stream1);
-	cudaStreamCreate(&stream2);
-
-	// create event; used for sync
-	cudaEvent_t cuEvent;
-	cudaEventCreate(&cuEvent);
-	//*/
-	
-	int* dev_queuex;
-	int* dev_queuey;
+	int* dev_queuexy;
 	short* dev_adata;
-	int* dev_max_val;
-	int* dev_max_n;
+	short* dev_max_val;
+	short* dev_max_n;	
 
-	// allocate memory on device
+	cudaEvent_t kernelStart, kernelStop, totalStart, totalStop;
+	cudaEventCreate(&kernelStart);
+	cudaEventCreate(&kernelStop);
+	cudaEventCreate(&totalStart);
+	cudaEventCreate(&totalStop);
+
+	//start the timer here for the total time
+	cudaEventRecord(totalStart, 0);
+
 	cudaMalloc((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
-	cudaMalloc((void**)&dev_queuex, count * sizeof(int));
-	cudaMalloc((void**)&dev_queuey, count * sizeof(int));
-	cudaMalloc((void**)&dev_max_val, count * sizeof(int));
-	cudaMalloc((void**)&dev_max_n, count * sizeof(int));
-
-	//*
-	// pin memory on host side
-	cudaMallocHost((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
-	cudaMallocHost((void**)&dev_queuex, count * sizeof(int));
-	cudaMallocHost((void**)&dev_queuey, count * sizeof(int));
-	cudaMallocHost((void**)&dev_max_val, count * sizeof(int));
-	cudaMallocHost((void**)&dev_max_n, count * sizeof(int));
-	//*/
+	cudaMalloc((void**)&dev_queuexy, count * sizeof(int));
+	cudaMalloc((void**)&dev_max_val, count * sizeof(short));
+	cudaMalloc((void**)&dev_max_n, count * sizeof(short));
 
 	// Copy input vectors from host memory to GPU buffers.
-
-	//*
-	// Async mem copy
-	cudaMemcpyAsync(dev_adata, adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyHostToDevice, stream1);
-	cudaMemcpyAsync(dev_queuex, queueX, count * sizeof(int), cudaMemcpyHostToDevice, stream1);
-	cudaMemcpyAsync(dev_queuey, queueY, count * sizeof(int), cudaMemcpyHostToDevice, stream1);
-
-	// sync point
-	cudaEventRecord(cuEvent, stream1); // record event
-	cudaStreamWaitEvent(stream2, cuEvent, 0); // wait for event in stream1
-	//*/
-
-	/*
-	// old mem copy
 	cudaMemcpy(dev_adata, adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyHostToDevice);
-	cudaMemcpy(dev_queuex, queueX, count * sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(dev_queuey, queueY, count * sizeof(int), cudaMemcpyHostToDevice);
-	//*/
+	cudaMemcpy(dev_queuexy, queueXY, count * sizeof(int), cudaMemcpyHostToDevice);
 
-	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE, stream2 >>> (count, dev_queuex, dev_queuey, numrho, dev_adata, dev_max_val, dev_max_n);
+	// Start the timer here for the kernel time
+	cudaEventRecord(kernelStart, 0);
 
-	//*
-	cudaMemcpyAsync(adata, dev_adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyDeviceToHost, stream1);
-	cudaMemcpyAsync(max_val, dev_max_val, count * sizeof(int), cudaMemcpyDeviceToHost, stream1);
-	cudaMemcpyAsync(max_n, dev_max_n, count * sizeof(int), cudaMemcpyDeviceToHost, stream1);
-	//*/
-
-	/*
-	// old mem copy
+	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE >>> (count, dev_queuexy, numrho, dev_adata, dev_max_val, dev_max_n);
 	cudaDeviceSynchronize();
 
-	cudaMemcpy(adata, dev_adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyDeviceToHost);
-	cudaMemcpy(max_val, dev_max_val, count * sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(max_n, dev_max_n, count * sizeof(int), cudaMemcpyDeviceToHost);
-	//*/
+	// Stop kernel timer here
+	cudaEventRecord(kernelStop, 0);
+	cudaEventSynchronize(kernelStop);
 
-	cudaFree(dev_queuex);
-	cudaFree(dev_queuey);
+	cudaMemcpy(adata, dev_adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyDeviceToHost);
+	cudaMemcpy(max_val, dev_max_val, count * sizeof(short), cudaMemcpyDeviceToHost);
+	cudaMemcpy(max_n, dev_max_n, count * sizeof(short), cudaMemcpyDeviceToHost);
+
+	// Stop total time here
+	cudaEventRecord(totalStop, 0);
+	cudaEventSynchronize(totalStop);
+
+	// Calculate elapsed times
+	float kernelTime, totalTime;
+	cudaEventElapsedTime(&kernelTime, kernelStart, kernelStop);
+	cudaEventElapsedTime(&totalTime, totalStart, totalStop);
+	//std::cout << "Kernel Time = " << kernelTime << "ms" << std::endl;
+	//std::cout << "Total Time = " << totalTime << "ms" << std::endl;
+
+	cudaFree(dev_queuexy);
 	cudaFree(dev_adata);
 	cudaFree(dev_max_val);
 	cudaFree(dev_max_n);
-
-	//*
-	// destroy streams
-	cudaStreamDestroy(stream1);
-	cudaStreamDestroy(stream2);
-
-	// destory cuda Event
-	cudaEventDestroy(cuEvent);
-	//*/
+	cudaEventDestroy(kernelStart);
+	cudaEventDestroy(totalStart);
+	cudaEventDestroy(kernelStop);
+	cudaEventDestroy(totalStop);
 }
 
 void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, std::vector<cv::Vec4i>& lines, int linesMax)
@@ -182,7 +152,7 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 	cv::Mat mask(height, width, CV_8UC1);
 
 	uchar* mdata0 = mask.ptr();
-	std::vector<int> nzlocX, nzlocY;
+	std::vector<int> nzlocXY;
 
 	// stage 1. collect non-zero image points
 	for (pt.y = 0; pt.y < height; pt.y++)
@@ -194,8 +164,7 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 			if (data[pt.x])
 			{
 				mdata[pt.x] = (uchar)1;
-				nzlocX.push_back(pt.x);
-				nzlocY.push_back(pt.y);
+				nzlocXY.push_back(pt.x << 16 | pt.y);
 			}
 			else
 			{
@@ -204,50 +173,18 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 		}
 	}
 
-	int count = (int)nzlocX.size();
+	int count = (int)nzlocXY.size();
+	if (count == 0)
+	{
+		return;
+	}
+
 	short* adata = accum.ptr<short>();
 
-	short* dev_adata;
-	int* dev_max_val;
-	int* dev_max_n;
-
 	// stage 2. accumulator area
-	int* maxNs = new int[count];
-	int* maxVals = new int[count];
-
-	UpdateAccumulatorAll(count, &nzlocX[0], &nzlocY[0], numrho, adata, maxVals, maxNs);
-
-	//for (int z = 0; z < count; z++)
-	//{
-	//	// update accumulator, find the most probable line
-	//	maxVals[z] = threshold - 1;
-	//	int max_n = 0;
-	//	int i = nzlocY[z];
-	//	int j = nzlocX[z];
-
-	//	// ---- CPU ----
-	//	//for (int n = 0; n < NUM_ANGLE; n++)
-	//	//{
-	//	//	int r = cvRound(j * hough_cos(n) + i * hough_sin(n));
-	//	//	r += (numrho - 1) / 2;
-	//	//	int val = ++adata[r + (n * numrho)];
-	//	//	if (val > maxVals[z])
-	//	//	{
-	//	//		maxVals[z] = val;
-	//	//		maxNs[z] = n;
-	//	//	}
-	//	//}
-
-	//	int loc_max = 0;
-	//	int loc_maxn = 0;
-	//	UpdateAccumulator(i, j, numrho, dev_adata, dev_max_val, dev_max_n,
-	//		adata, &loc_max, &loc_maxn, cuEvent, stream1, stream2);
-	//	if (loc_max > maxVals[z])
-	//	{
-	//		maxVals[z] = loc_max;
-	//		maxNs[z] = loc_maxn;
-	//	}
-	//}
+	short* maxNs = new short[count];
+	short* maxVals = new short[count];
+	UpdateAccumulatorAll(count, &nzlocXY[0], numrho, adata, maxVals, maxNs);
 
 	// stage 2. process all the points in random order
 	for (; count > 0; count--)
@@ -255,7 +192,7 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 		// choose random point out of the remaining ones
 		int idx = rng.uniform(0, count);
 
-		cv::Point point = cv::Point(nzlocX[idx], nzlocY[idx]);
+		cv::Point point = cv::Point(nzlocXY[idx] >> 16, nzlocXY[idx] & 0xFFFF);
 		cv::Point line_end[2];
 
 		int i = point.y, j = point.x;
@@ -263,8 +200,7 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 		bool xflag, good_line;
 
 		// "remove" it by overriding it with the last element
-		nzlocX[idx] = nzlocX[count - 1];
-		nzlocY[idx] = nzlocY[count - 1];
+		nzlocXY[idx] = nzlocXY[count - 1];
 
 		// check if it has been excluded already (i.e. belongs to some other line)
 		if (!mdata0[i*width + j])
@@ -397,7 +333,9 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 				cv::Vec4i lr(line_end[0].x, line_end[0].y, line_end[1].x, line_end[1].y);
 				lines.push_back(lr);
 				if ((int)lines.size() >= linesMax)
+				{
 					return;
+				}
 			}
 		}
 	}
@@ -444,7 +382,7 @@ void HoughLines_CPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 	int count = (int)nzlocX.size();
 	short* adata = accum.ptr<short>();
 
-// stage 2. process all the points in random order
+	// stage 2. process all the points in random order
 	for (; count > 0; count--)
 	{
 		// choose random point out of the remaining ones
@@ -607,24 +545,20 @@ void HoughLines_CPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 				cv::Vec4i lr(line_end[0].x, line_end[0].y, line_end[1].x, line_end[1].y);
 				lines.push_back(lr);
 				if ((int)lines.size() >= linesMax)
+				{
 					return;
+				}
 			}
 		}
 	}
 }
 
-int main()
+void DoComparison(cv::Mat srcImage)
 {
 	const int ddepth = CV_16S;
-	const int ksize = 3;
+	const int ksize = 5;
 
-	cv::Mat srcImage = cv::imread("test.png");
-	if (srcImage.empty())
-	{
-		return EXIT_FAILURE;
-	}
-
-	// Remove noise by blurring with a Gaussian filter ( kernel size = 3 )
+	// Remove noise by blurring with a Gaussian filter
 	cv::Mat srcBlurred;
 	GaussianBlur(srcImage, srcBlurred, cv::Size(ksize, ksize), 0, 0, cv::BORDER_DEFAULT);
 
@@ -642,23 +576,144 @@ int main()
 	cv::Canny(grad_x, grad_y, canny, 100, 150);
 	cv::imwrite("canny.png", canny);
 
-	// Run probabilistic hough line detection
-	auto start = std::chrono::high_resolution_clock::now();
+	cv::Mat srcCopy = srcImage.clone();
 
-	std::vector<cv::Vec4i> lines;
-	HoughLines_GPU(canny, 80, 200, 10, lines, 10);
+	const int lineLength = 100;
+	const int lineGap = 120;
+	const int maxLines = 10;
+	const int threshold = 500;
 
-	auto end = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double, std::ratio<1, 1000>> time = end - start;
-	std::cout << "Execution time: " << time.count() << "ms" << std::endl;
+	// Run GPU probabilistic hough line detection
+	auto gpuStart = std::chrono::high_resolution_clock::now();
+
+	std::vector<cv::Vec4i> gpu_lines;
+	HoughLines_GPU(canny, threshold, lineLength, lineGap, gpu_lines, maxLines);
+
+	auto gpuEnd = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::ratio<1, 1000>> gpu_time = gpuEnd - gpuStart;
+	std::cout << "(GPU) Execution time: " << gpu_time.count() << "ms" << std::endl;
 
 	// Draw lines detected 
-	for (int k = 0; k < lines.size(); k++)
+	for (int k = 0; k < gpu_lines.size(); k++)
 	{
-		cv::line(srcImage, cv::Point(lines[k][0], lines[k][1]), cv::Point(lines[k][2],
-			lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+		cv::line(srcImage, cv::Point(gpu_lines[k][0], gpu_lines[k][1]), cv::Point(gpu_lines[k][2],
+			gpu_lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
 	}
 
 	// Output image
-	cv::imwrite("detected.png", srcImage);
+	cv::imwrite("gpu_detected.png", srcImage);
+
+	// Run CPU probabilistic hough line detection
+	auto cpuStart = std::chrono::high_resolution_clock::now();
+
+	std::vector<cv::Vec4i> cpu_lines;
+	HoughLines_CPU(canny, threshold, lineLength, lineGap, cpu_lines, maxLines);
+
+	auto cpuEnd = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::ratio<1, 1000>> cpu_time = cpuEnd - cpuStart;
+	std::cout << "(CPU) Execution time: " << cpu_time.count() << "ms" << std::endl;
+
+	// Draw lines detected 
+	for (int k = 0; k < cpu_lines.size(); k++)
+	{
+		cv::line(srcCopy, cv::Point(cpu_lines[k][0], cpu_lines[k][1]), cv::Point(cpu_lines[k][2],
+			cpu_lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+	}
+
+	// Output image
+	cv::imwrite("cpu_detected.png", srcCopy);
+}
+
+cv::Mat filter_roi(cv::Mat &input, cv::Point top_left, cv::Point top_right, cv::Point bot_left, cv::Point bot_right) {
+	cv::Point corners[1][4];
+	corners[0][0] = bot_left;
+	corners[0][1] = top_left;
+	corners[0][2] = top_right;
+	corners[0][3] = bot_right;
+
+	const cv::Point* corner_list[1] = { corners[0] };
+	int num_points = 4;
+	int num_polygons = 1;
+
+	cv::Mat mask = cv::Mat::zeros(cv::Size(input.cols, input.rows), input.type());
+
+	cv::fillPoly(mask, corner_list, &num_points, num_polygons, cv::Scalar(255, 255, 255));
+	cv::Mat output(cv::Size(mask.cols, mask.rows), input.type());
+
+	// perform an AND operation to remove everything that isn't within the polygon
+	cv::bitwise_and(input, mask, output);
+	return output;
+}
+
+void SaveHoughLines(cv::Mat originImage, cv::Mat srcImage, cv::String filename)
+{
+	int h = srcImage.cols;
+	const int ddepth = CV_16S;
+	const int ksize = 1;
+
+	// Remove noise by blurring with a Gaussian filter
+	cv::Mat srcBlurred;
+	GaussianBlur(srcImage, srcBlurred, cv::Size(ksize, ksize), 0, 0, cv::BORDER_DEFAULT);
+
+	// Convert the image to grayscale
+	cv::Mat srcGray;
+	cvtColor(srcBlurred, srcGray, cv::COLOR_BGR2GRAY);
+
+	// Run sobel edge detection
+	cv::Mat grad_x, grad_y;
+	cv::Sobel(srcGray, grad_x, ddepth, 1, 0, ksize, cv::BORDER_DEFAULT);
+	cv::Sobel(srcGray, grad_y, ddepth, 0, 1, ksize, cv::BORDER_DEFAULT);
+
+	// Run canny edge detection
+	cv::Mat canny;
+	cv::Canny(grad_x, grad_y, canny, 100, 150);
+
+	const int lineLength = 100;
+	const int lineGap = 15;
+	const int maxLines = 15;
+	const int threshold = 20;
+
+	std::vector<cv::Vec4i> gpu_lines;
+	HoughLines_GPU(canny, threshold, lineLength, lineGap, gpu_lines, maxLines);
+
+	// Draw lines detected 
+	for (int k = 0; k < gpu_lines.size(); k++)
+	{
+		cv::line(originImage, cv::Point(gpu_lines[k][0], gpu_lines[k][1]), cv::Point(gpu_lines[k][2],
+			gpu_lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+	}
+
+	// Output image
+	cv::imwrite(filename, originImage);
+}
+
+int main()
+{
+	cudaFree(0); //God tier line
+
+	cv::VideoCapture cap("highway.mp4"); // video
+	if (!cap.isOpened())
+	{
+		std::cout << "Cannot open the video file" << std::endl;
+		return -1;
+	}
+
+	const int frames = 50;
+	for (int f = 0; f < frames; f++)
+	{
+		cv::Mat frame;
+		frame.convertTo(frame, CV_64F);
+
+		bool bSuccess = cap.read(frame); // read a new frame from video
+		if (!bSuccess)
+		{
+			std::cout << "Cannot read the frame from video file" << std::endl;
+			break;
+		}
+
+		cv::Mat roi = filter_roi(frame, cv::Point(2, 440), cv::Point(1278, 440),
+			cv::Point(2, 719), cv::Point(1278, 719));
+
+		SaveHoughLines(frame, roi, "./Frames/frame" + std::to_string(f) + ".png");
+	}
 }
