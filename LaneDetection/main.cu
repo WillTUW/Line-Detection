@@ -174,11 +174,12 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 	}
 
 	int count = (int)nzlocXY.size();
-	short* adata = accum.ptr<short>();
+	if (count == 0)
+	{
+		return;
+	}
 
-	short* dev_adata;
-	short* dev_max_val;
-	short* dev_max_n;
+	short* adata = accum.ptr<short>();
 
 	// stage 2. accumulator area
 	short* maxNs = new short[count];
@@ -552,20 +553,12 @@ void HoughLines_CPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 	}
 }
 
-int main()
+void DoComparison(cv::Mat srcImage)
 {
-	cudaFree(0); //God tier line
-
 	const int ddepth = CV_16S;
-	const int ksize = 3;
+	const int ksize = 1;
 
-	cv::Mat srcImage = cv::imread("test.png");
-	if (srcImage.empty())
-	{
-		return EXIT_FAILURE;
-	}
-
-	// Remove noise by blurring with a Gaussian filter ( kernel size = 3 )
+	// Remove noise by blurring with a Gaussian filter
 	cv::Mat srcBlurred;
 	GaussianBlur(srcImage, srcBlurred, cv::Size(ksize, ksize), 0, 0, cv::BORDER_DEFAULT);
 
@@ -585,11 +578,16 @@ int main()
 
 	cv::Mat srcCopy = srcImage.clone();
 
+	const int lineLength = 20;
+	const int lineGap = 10;
+	const int maxLines = 100;
+	const int threshold = 20;
+
 	// Run GPU probabilistic hough line detection
 	auto gpuStart = std::chrono::high_resolution_clock::now();
 
 	std::vector<cv::Vec4i> gpu_lines;
-	HoughLines_GPU(canny, 80, 200, 10, gpu_lines, 10);
+	HoughLines_GPU(canny, threshold, lineLength, lineGap, gpu_lines, maxLines);
 
 	auto gpuEnd = std::chrono::high_resolution_clock::now();
 	std::chrono::duration<double, std::ratio<1, 1000>> gpu_time = gpuEnd - gpuStart;
@@ -609,7 +607,7 @@ int main()
 	auto cpuStart = std::chrono::high_resolution_clock::now();
 
 	std::vector<cv::Vec4i> cpu_lines;
-	HoughLines_CPU(canny, 80, 200, 10, cpu_lines, 10);
+	HoughLines_CPU(canny, threshold, lineLength, lineGap, cpu_lines, maxLines);
 
 	auto cpuEnd = std::chrono::high_resolution_clock::now();
 	std::chrono::duration<double, std::ratio<1, 1000>> cpu_time = cpuEnd - cpuStart;
@@ -624,4 +622,98 @@ int main()
 
 	// Output image
 	cv::imwrite("cpu_detected.png", srcCopy);
+}
+
+cv::Mat filter_roi(cv::Mat &input, cv::Point top_left, cv::Point top_right, cv::Point bot_left, cv::Point bot_right) {
+	cv::Point corners[1][4];
+	corners[0][0] = bot_left;
+	corners[0][1] = top_left;
+	corners[0][2] = top_right;
+	corners[0][3] = bot_right;
+
+	const cv::Point* corner_list[1] = { corners[0] };
+	int num_points = 4;
+	int num_polygons = 1;
+
+	cv::Mat mask = cv::Mat::zeros(cv::Size(input.cols, input.rows), input.type());
+
+	cv::fillPoly(mask, corner_list, &num_points, num_polygons, cv::Scalar(255, 255, 255));
+	cv::Mat output(cv::Size(mask.cols, mask.rows), input.type());
+
+	// perform an AND operation to remove everything that isn't within the polygon
+	cv::bitwise_and(input, mask, output);
+	return output;
+}
+
+void SaveHoughLines(cv::Mat srcImage, cv::String filename)
+{
+	int h = srcImage.cols;
+	const int ddepth = CV_16S;
+	const int ksize = 1;
+
+	// Remove noise by blurring with a Gaussian filter
+	cv::Mat srcBlurred;
+	GaussianBlur(srcImage, srcBlurred, cv::Size(ksize, ksize), 0, 0, cv::BORDER_DEFAULT);
+
+	// Convert the image to grayscale
+	cv::Mat srcGray;
+	cvtColor(srcBlurred, srcGray, cv::COLOR_BGR2GRAY);
+
+	// Run sobel edge detection
+	cv::Mat grad_x, grad_y;
+	cv::Sobel(srcGray, grad_x, ddepth, 1, 0, ksize, cv::BORDER_DEFAULT);
+	cv::Sobel(srcGray, grad_y, ddepth, 0, 1, ksize, cv::BORDER_DEFAULT);
+
+	// Run canny edge detection
+	cv::Mat canny;
+	cv::Canny(grad_x, grad_y, canny, 100, 150);
+
+	const int lineLength = 100;
+	const int lineGap = 15;
+	const int maxLines = 15;
+	const int threshold = 20;
+
+	std::vector<cv::Vec4i> gpu_lines;
+	HoughLines_GPU(canny, threshold, lineLength, lineGap, gpu_lines, maxLines);
+
+	// Draw lines detected 
+	for (int k = 0; k < gpu_lines.size(); k++)
+	{
+		cv::line(srcImage, cv::Point(gpu_lines[k][0], gpu_lines[k][1]), cv::Point(gpu_lines[k][2],
+			gpu_lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+	}
+
+	// Output image
+	cv::imwrite(filename, srcImage);
+}
+
+int main()
+{
+	cudaFree(0); //God tier line
+
+	cv::VideoCapture cap("highway.mp4"); // video
+	if (!cap.isOpened())
+	{
+		std::cout << "Cannot open the video file" << std::endl;
+		return -1;
+	}
+
+	const int frames = 100;
+	for (int f = 0; f < frames; f++)
+	{
+		cv::Mat frame;
+		frame.convertTo(frame, CV_64F);
+
+		bool bSuccess = cap.read(frame); // read a new frame from video
+		if (!bSuccess)
+		{
+			std::cout << "Cannot read the frame from video file" << std::endl;
+			break;
+		}
+
+		cv::Mat roi = filter_roi(frame, cv::Point(2, 440), cv::Point(1278, 440),
+			cv::Point(2, 719), cv::Point(1278, 719));
+
+		SaveHoughLines(roi, "./Frames/frame" + std::to_string(f) + ".png");
+	}
 }
