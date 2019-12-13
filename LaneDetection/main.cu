@@ -54,7 +54,6 @@ __global__ void GPU_UpdateAccumulatorAll(int count, int *queueXY, int numrho, sh
 	smax_n[n] = n;
 	__syncthreads();
 
-#pragma unroll
 	for (int s = 1; s < NUM_ANGLE; s *= 2)
 	{
 		int index = (2 * s) * n; // Next
@@ -77,12 +76,21 @@ __global__ void GPU_UpdateAccumulatorAll(int count, int *queueXY, int numrho, sh
 	}
 }
 
-void _UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, short* max_val, short* max_n)
+void UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, short* max_val, short* max_n)
 {
 	int* dev_queuexy;
 	short* dev_adata;
 	short* dev_max_val;
-	short* dev_max_n;
+	short* dev_max_n;	
+
+	cudaEvent_t kernelStart, kernelStop, totalStart, totalStop;
+	cudaEventCreate(&kernelStart);
+	cudaEventCreate(&kernelStop);
+	cudaEventCreate(&totalStart);
+	cudaEventCreate(&totalStop);
+
+	//start the timer here for the total time
+	cudaEventRecord(totalStart, 0);
 
 	cudaMalloc((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
 	cudaMalloc((void**)&dev_queuexy, count * sizeof(int));
@@ -93,74 +101,39 @@ void _UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, sh
 	cudaMemcpy(dev_adata, adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyHostToDevice);
 	cudaMemcpy(dev_queuexy, queueXY, count * sizeof(int), cudaMemcpyHostToDevice);
 
-	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE >>> (count, dev_queuexy, numrho, dev_adata, dev_max_val, dev_max_n);
+	// Start the timer here for the kernel time
+	cudaEventRecord(kernelStart, 0);
 
+	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE >>> (count, dev_queuexy, numrho, dev_adata, dev_max_val, dev_max_n);
 	cudaDeviceSynchronize();
+
+	// Stop kernel timer here
+	cudaEventRecord(kernelStop, 0);
+	cudaEventSynchronize(kernelStop);
 
 	cudaMemcpy(adata, dev_adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyDeviceToHost);
 	cudaMemcpy(max_val, dev_max_val, count * sizeof(short), cudaMemcpyDeviceToHost);
 	cudaMemcpy(max_n, dev_max_n, count * sizeof(short), cudaMemcpyDeviceToHost);
 
-	cudaFree(dev_queuexy);
-	cudaFree(dev_adata);
-	cudaFree(dev_max_val);
-	cudaFree(dev_max_n);
-}
+	// Stop total time here
+	cudaEventRecord(totalStop, 0);
+	cudaEventSynchronize(totalStop);
 
-void UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, short* max_val, short* max_n)
-{
-	// create streams, one for 
-	cudaStream_t stream1, stream2;
-	cudaStreamCreate(&stream1);
-	cudaStreamCreate(&stream2);
-
-	// create event; used for sync
-	cudaEvent_t cuEvent;
-	cudaEventCreate(&cuEvent);
-	//*/
-
-	int* dev_queuexy;
-	short* dev_adata;
-	short* dev_max_val;
-	short* dev_max_n;
-
-	// allocate memory on device
-	cudaMalloc((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
-	cudaMalloc((void**)&dev_queuexy, count * sizeof(int));
-	cudaMalloc((void**)&dev_max_val, count * sizeof(short));
-	cudaMalloc((void**)&dev_max_n, count * sizeof(short));
-
-	// pin memory on host side
-	cudaMallocHost((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
-	cudaMallocHost((void**)&dev_queuexy, count * sizeof(int));
-	cudaMallocHost((void**)&dev_max_val, count * sizeof(short));
-	cudaMallocHost((void**)&dev_max_n, count * sizeof(short));
-
-	// Async mem copy
-	cudaMemcpyAsync(dev_adata, adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyHostToDevice, stream1);
-	cudaMemcpyAsync(dev_queuexy, queueXY, count * sizeof(int), cudaMemcpyHostToDevice, stream1);
-
-	// sync point
-	cudaEventRecord(cuEvent, stream1); // record event
-	cudaStreamWaitEvent(stream2, cuEvent, 0); // wait for event in stream1
-
-	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE, 1, stream2 >>> (count, dev_queuexy, numrho, dev_adata, dev_max_val, dev_max_n);
-
-	cudaMemcpyAsync(adata, dev_adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyDeviceToHost, stream1);
-	cudaMemcpyAsync(max_val, dev_max_val, count * sizeof(short), cudaMemcpyDeviceToHost, stream1);
-	cudaMemcpyAsync(max_n, dev_max_n, count * sizeof(short), cudaMemcpyDeviceToHost, stream1);
+	// Calculate elapsed times
+	float kernelTime, totalTime;
+	cudaEventElapsedTime(&kernelTime, kernelStart, kernelStop);
+	cudaEventElapsedTime(&totalTime, totalStart, totalStop);
+	std::cout << "Kernel Time = " << kernelTime << "ms" << std::endl;
+	std::cout << "Total Time = " << totalTime << "ms" << std::endl;
 
 	cudaFree(dev_queuexy);
 	cudaFree(dev_adata);
 	cudaFree(dev_max_val);
 	cudaFree(dev_max_n);
-
-	// destroy streams
-	cudaStreamDestroy(stream1);
-	cudaStreamDestroy(stream2);
-
-	// destory cuda Event
-	cudaEventDestroy(cuEvent);
+	cudaEventDestroy(kernelStart);
+	cudaEventDestroy(totalStart);
+	cudaEventDestroy(kernelStop);
+	cudaEventDestroy(totalStop);
 }
 
 void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, std::vector<cv::Vec4i>& lines, int linesMax)
@@ -359,7 +332,9 @@ void HoughLines_GPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 				cv::Vec4i lr(line_end[0].x, line_end[0].y, line_end[1].x, line_end[1].y);
 				lines.push_back(lr);
 				if ((int)lines.size() >= linesMax)
+				{
 					return;
+				}
 			}
 		}
 	}
@@ -569,7 +544,9 @@ void HoughLines_CPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 				cv::Vec4i lr(line_end[0].x, line_end[0].y, line_end[1].x, line_end[1].y);
 				lines.push_back(lr);
 				if ((int)lines.size() >= linesMax)
+				{
 					return;
+				}
 			}
 		}
 	}
@@ -577,6 +554,8 @@ void HoughLines_CPU(cv::Mat& image, int threshold, int lineLength, int lineGap, 
 
 int main()
 {
+	cudaFree(0); //God tier line
+
 	const int ddepth = CV_16S;
 	const int ksize = 3;
 
@@ -604,24 +583,45 @@ int main()
 	cv::Canny(grad_x, grad_y, canny, 100, 150);
 	cv::imwrite("canny.png", canny);
 
-	// Run probabilistic hough line detection
-	auto start = std::chrono::high_resolution_clock::now();
+	cv::Mat srcCopy = srcImage.clone();
 
-	//
-	std::vector<cv::Vec4i> lines;
-	HoughLines_GPU(canny, 80, 200, 10, lines, 10);
+	// Run GPU probabilistic hough line detection
+	auto gpuStart = std::chrono::high_resolution_clock::now();
 
-	auto end = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double, std::ratio<1, 1000>> time = end - start;
-	std::cout << "Execution time: " << time.count() << "ms" << std::endl;
+	std::vector<cv::Vec4i> gpu_lines;
+	HoughLines_GPU(canny, 80, 200, 10, gpu_lines, 10);
+
+	auto gpuEnd = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::ratio<1, 1000>> gpu_time = gpuEnd - gpuStart;
+	std::cout << "(GPU) Execution time: " << gpu_time.count() << "ms" << std::endl;
 
 	// Draw lines detected 
-	for (int k = 0; k < lines.size(); k++)
+	for (int k = 0; k < gpu_lines.size(); k++)
 	{
-		cv::line(srcImage, cv::Point(lines[k][0], lines[k][1]), cv::Point(lines[k][2],
-			lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+		cv::line(srcImage, cv::Point(gpu_lines[k][0], gpu_lines[k][1]), cv::Point(gpu_lines[k][2],
+			gpu_lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
 	}
 
 	// Output image
-	cv::imwrite("detected.png", srcImage);
+	cv::imwrite("gpu_detected.png", srcImage);
+
+	// Run CPU probabilistic hough line detection
+	auto cpuStart = std::chrono::high_resolution_clock::now();
+
+	std::vector<cv::Vec4i> cpu_lines;
+	HoughLines_CPU(canny, 80, 200, 10, cpu_lines, 10);
+
+	auto cpuEnd = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::ratio<1, 1000>> cpu_time = cpuEnd - cpuStart;
+	std::cout << "(CPU) Execution time: " << cpu_time.count() << "ms" << std::endl;
+
+	// Draw lines detected 
+	for (int k = 0; k < cpu_lines.size(); k++)
+	{
+		cv::line(srcCopy, cv::Point(cpu_lines[k][0], cpu_lines[k][1]), cv::Point(cpu_lines[k][2],
+			cpu_lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+	}
+
+	// Output image
+	cv::imwrite("cpu_detected.png", srcCopy);
 }
