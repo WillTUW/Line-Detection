@@ -115,14 +115,20 @@ void HoughLinesProbabilistic_v1(cv::Mat& image, int threshold, int lineLength, i
 
 	//*
 	// create streams, one for 
-	cudaStream_t stream1, stream2;
+	cudaStream_t stream1, stream2, stream3, stream4, stream5, stream6;
 	cudaStreamCreate(&stream1);
 	cudaStreamCreate(&stream2);
+	cudaStreamCreate(&stream3);
+	cudaStreamCreate(&stream4);
+	cudaStreamCreate(&stream5);
+	cudaStreamCreate(&stream6);
 
 	// create event; used for sync
 	cudaEvent_t cuEvent;
 	cudaEventCreate(&cuEvent); 
 	//*/
+
+	int toggle = 1; 
 
 	// allocate memory on device
 	cudaMalloc((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
@@ -162,8 +168,23 @@ void HoughLinesProbabilistic_v1(cv::Mat& image, int threshold, int lineLength, i
 		// ---- GPU -----
 		int loc_max = 0;
 		int loc_maxn = 0;
-		UpdateAccumulator(i, j, numrho, dev_adata, dev_max_val, dev_max_n, 
-			adata, &loc_max, &loc_maxn, cuEvent, stream1, stream2);
+		
+		// used to select toggle
+		if (toggle == 1) {
+			UpdateAccumulator(i, j, numrho, dev_adata, dev_max_val, dev_max_n,
+				adata, &loc_max, &loc_maxn, cuEvent, stream1, stream2);
+		}
+		else if (toggle == 2) {
+			UpdateAccumulator(i, j, numrho, dev_adata, dev_max_val, dev_max_n,
+				adata, &loc_max, &loc_maxn, cuEvent, stream3, stream4);
+		}
+		else {
+			UpdateAccumulator(i, j, numrho, dev_adata, dev_max_val, dev_max_n,
+				adata, &loc_max, &loc_maxn, cuEvent, stream5, stream6);
+			toggle = 0;
+		}
+		toggle++;
+
 		if (loc_max > max_val)
 		{
 			max_val = loc_max;
@@ -324,6 +345,10 @@ void HoughLinesProbabilistic_v1(cv::Mat& image, int threshold, int lineLength, i
 	// destroy streams
 	cudaStreamDestroy(stream1);
 	cudaStreamDestroy(stream2);
+	cudaStreamDestroy(stream3);
+	cudaStreamDestroy(stream4);
+	cudaStreamDestroy(stream5);
+	cudaStreamDestroy(stream6);
 
 	// destory cuda Event
 	cudaEventDestroy(cuEvent);
@@ -366,7 +391,7 @@ int main()
 	HoughLinesProbabilistic_v1(canny, 80, 200, 10, lines, 10);
 
 	auto end = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double, std::ratio<1, 1000>> time = end - start;
+	std::chrono::duration<double, std::ratio<1, 1>> time = end - start;
 	std::cout << "Execution time: " << time.count() << "ms" << std::endl;
 
 	// Draw lines detected 
