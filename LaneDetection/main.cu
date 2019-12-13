@@ -80,7 +80,7 @@ __global__ void GPU_UpdateAccumulatorAll(int count, int *queueX, int *queueY, in
 
 void UpdateAccumulatorAll(int count, int *queueX, int *queueY, int numrho, short* adata, int* max_val, int* max_n)
 {
-	/*
+	//*
 	// create streams, one for 
 	cudaStream_t stream1, stream2;
 	cudaStreamCreate(&stream1);
@@ -104,7 +104,7 @@ void UpdateAccumulatorAll(int count, int *queueX, int *queueY, int numrho, short
 	cudaMalloc((void**)&dev_max_val, count * sizeof(int));
 	cudaMalloc((void**)&dev_max_n, count * sizeof(int));
 
-	/*
+	//*
 	// pin memory on host side
 	cudaMallocHost((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
 	cudaMallocHost((void**)&dev_queuex, count * sizeof(int));
@@ -115,7 +115,7 @@ void UpdateAccumulatorAll(int count, int *queueX, int *queueY, int numrho, short
 
 	// Copy input vectors from host memory to GPU buffers.
 
-	/*
+	//*
 	// Async mem copy
 	cudaMemcpyAsync(dev_adata, adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyHostToDevice, stream1);
 	cudaMemcpyAsync(dev_queuex, queueX, count * sizeof(int), cudaMemcpyHostToDevice, stream1);
@@ -126,22 +126,22 @@ void UpdateAccumulatorAll(int count, int *queueX, int *queueY, int numrho, short
 	cudaStreamWaitEvent(stream2, cuEvent, 0); // wait for event in stream1
 	//*/
 
-	//*
+	/*
 	// old mem copy
 	cudaMemcpy(dev_adata, adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyHostToDevice);
 	cudaMemcpy(dev_queuex, queueX, count * sizeof(int), cudaMemcpyHostToDevice);
 	cudaMemcpy(dev_queuey, queueY, count * sizeof(int), cudaMemcpyHostToDevice);
 	//*/
 
-	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE >>> (count, dev_queuex, dev_queuey, numrho, dev_adata, dev_max_val, dev_max_n);
+	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE, stream2 >>> (count, dev_queuex, dev_queuey, numrho, dev_adata, dev_max_val, dev_max_n);
 
-	/*
+	//*
 	cudaMemcpyAsync(adata, dev_adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyDeviceToHost, stream1);
 	cudaMemcpyAsync(max_val, dev_max_val, count * sizeof(int), cudaMemcpyDeviceToHost, stream1);
 	cudaMemcpyAsync(max_n, dev_max_n, count * sizeof(int), cudaMemcpyDeviceToHost, stream1);
 	//*/
 
-	//*
+	/*
 	// old mem copy
 	cudaDeviceSynchronize();
 
