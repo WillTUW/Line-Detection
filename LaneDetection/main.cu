@@ -391,7 +391,7 @@ int main()
 	HoughLinesProbabilistic_v1(canny, 80, 200, 10, lines, 10);
 
 	auto end = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double, std::ratio<1, 1>> time = end - start;
+	std::chrono::duration<double, std::ratio<1, 1000>> time = end - start;
 	std::cout << "Execution time: " << time.count() << "ms" << std::endl;
 
 	// Draw lines detected 
