@@ -1,7 +1,7 @@
-#include "acc.cuh"
+#include "acc_update.cuh"
 
 //Can you use functions in cuda? Like round?
-__global__ void GPU_UpdateAccumulator(int i, int j, int numrho, int* adata, int* max_val, int* max_n)
+__global__ void GPU_UpdateAccumulator(int i, int j, int numrho, short* adata, int* max_val, int* max_n)
 {
 	// update accumulator, find the most probable line
 	//for (int n = 0; n < NUM_ANGLE; n++, adata += numrho)
@@ -15,11 +15,10 @@ __global__ void GPU_UpdateAccumulator(int i, int j, int numrho, int* adata, int*
 	__shared__ int smax_val[NUM_ANGLE];
 	__shared__ int smax_n[NUM_ANGLE];
 
-	int r = round(j * hough_cos(n) + i * hough_sin(n));
-	r += (numrho - 1) / 2;
+	int r = round(j * hough_cos(n) + i * hough_sin(n)) + ((numrho - 1) / 2);
 
 	adata[r + (n * numrho)] += 1;
-	int val = adata[r + (n * numrho)]; //Affects this line
+	int val = adata[r + (n * numrho)];
 
 	smax_val[n] = val;
 	smax_n[n] = n;
@@ -47,33 +46,21 @@ __global__ void GPU_UpdateAccumulator(int i, int j, int numrho, int* adata, int*
 	}
 }
 
-void UpdateAccumulator(int i, int j, int numrho, int* adata, int *max_val, int *max_n)
+void UpdateAccumulator(int i, int j, int numrho, short* dev_adata, int* dev_max_val, int* dev_max_n, short* adata, int *max_val, int *max_n)
 {
 	int host_max_val[1];
 	int host_max_n[1];
 
-	int* dev_adata;
-	int* dev_max_val;
-	int* dev_max_n;
-
-	cudaMalloc((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(int));
-	cudaMalloc((void**)&dev_max_val, 1 * sizeof(int));
-	cudaMalloc((void**)&dev_max_n, 1 * sizeof(int));
-
 	// Copy input vectors from host memory to GPU buffers.
-	cudaMemcpy(dev_adata, adata, NUM_ANGLE * numrho * sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(dev_adata, adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyHostToDevice);
 
 	GPU_UpdateAccumulator << < 1, NUM_ANGLE >> > (i, j, numrho, dev_adata, dev_max_val, dev_max_n);
 
 	cudaDeviceSynchronize();
 
-	cudaMemcpy(adata, dev_adata, NUM_ANGLE * numrho * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(adata, dev_adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyDeviceToHost);
 	cudaMemcpy(host_max_val, dev_max_val, 1 * sizeof(int), cudaMemcpyDeviceToHost);
 	cudaMemcpy(host_max_n, dev_max_n, 1 * sizeof(int), cudaMemcpyDeviceToHost);
-
-	cudaFree(dev_adata);
-	cudaFree(dev_max_val);
-	cudaFree(dev_max_n);
 
 	*max_val = host_max_val[0];
 	*max_n = host_max_n[0];

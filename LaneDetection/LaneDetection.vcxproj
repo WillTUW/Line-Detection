@@ -82,7 +82,8 @@
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <CudaCompile Include="acc.cu" />
+    <CudaCompile Include="acc_update.cu" />
+    <CudaCompile Include="hough.cu" />
     <CudaCompile Include="main.cu" />
   </ItemGroup>
   <ItemGroup>
@@ -97,7 +98,8 @@
     </Content>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="acc.cuh" />
+    <ClInclude Include="acc_update.cuh" />
+    <ClInclude Include="hough.cuh" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

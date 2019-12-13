@@ -13,10 +13,63 @@
 #include <stdarg.h>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 #include <list>
-#include "acc.cuh"
+#include "acc_update.cuh"
 
-void HoughLinesProbabilistic(cv::Mat& image, int threshold, int lineLength, int lineGap, std::vector<cv::Vec4i>& lines, int linesMax)
+void HoughLinesProbabilistic_v2(cv::Mat& image, int threshold, int lineLength, int lineGap, std::vector<cv::Vec4i>& lines, int linesMax)
+{
+	CV_Assert(image.type() == CV_8UC1);
+
+	int width = image.cols;
+	int height = image.rows;
+
+	int numrho = cvRound(((width + height) * 2 + 1) / RHO);
+
+	cv::Mat accum = cv::Mat::zeros(NUM_ANGLE, numrho, CV_32SC1);
+	cv::Mat mask(height, width, CV_8UC1);
+
+	uchar* mdata0 = mask.ptr();
+	std::vector<int> nzlocX;
+	std::vector<int> nzlocY;
+
+	// stage 1. collect non-zero image points
+	for (int y = 0; y < height; y++)
+	{
+		const uchar* data = image.ptr(y);
+		uchar* mdata = mask.ptr(y);
+		for (int x = 0; x < width; x++)
+		{
+			if (data[x])
+			{
+				mdata[x] = (uchar)1;
+				nzlocX.push_back(x);
+				nzlocY.push_back(y);
+			}
+			else
+			{
+				mdata[x] = 0;
+			}
+		}
+	}
+
+	int count = (int)nzlocX.size();
+	int* adata = accum.ptr<int>();
+
+	int* outX0 = new int[count];
+	int* outY0 = new int[count];
+	int* outX1 = new int[count];
+	int* outY1 = new int[count];
+
+	//Hough(width, height, &nzlocX[0], &nzlocY[0], count, adata, mdata0, numrho, outX0, outY0, outX1, outY1);
+
+	delete[] outX0;
+	delete[] outY0;
+	delete[] outX1;
+	delete[] outY1;
+}
+
+void HoughLinesProbabilistic_v1(cv::Mat& image, int threshold, int lineLength, int lineGap, std::vector<cv::Vec4i>& lines, int linesMax)
 {
 	cv::Point pt;
 	cv::RNG rng((uint64)-1);
@@ -28,7 +81,7 @@ void HoughLinesProbabilistic(cv::Mat& image, int threshold, int lineLength, int 
 
 	int numrho = cvRound(((width + height) * 2 + 1) / RHO);
 
-	cv::Mat accum = cv::Mat::zeros(NUM_ANGLE, numrho, CV_32SC1);
+	cv::Mat accum = cv::Mat::zeros(NUM_ANGLE, numrho, CV_16SC1);
 	cv::Mat mask(height, width, CV_8UC1);
 
 	uchar* mdata0 = mask.ptr();
@@ -54,7 +107,15 @@ void HoughLinesProbabilistic(cv::Mat& image, int threshold, int lineLength, int 
 	}
 
 	int count = (int)nzloc.size();
-	int* adata = accum.ptr<int>();
+	short* adata = accum.ptr<short>();
+
+	short* dev_adata;
+	int* dev_max_val;
+	int* dev_max_n;
+
+	cudaMalloc((void**)&dev_adata, NUM_ANGLE * numrho * sizeof(short));
+	cudaMalloc((void**)&dev_max_val, 1 * sizeof(int));
+	cudaMalloc((void**)&dev_max_n, 1 * sizeof(int));
 
 	// stage 2. process all the points in random order
 	for (; count > 0; count--)
@@ -80,15 +141,18 @@ void HoughLinesProbabilistic(cv::Mat& image, int threshold, int lineLength, int 
 		int max_val = threshold - 1;
 
 		// update accumulator, find the most probable line
+
+		// ---- GPU -----
 		int loc_max = 0;
 		int loc_maxn = 0;
-		UpdateAccumulator(i, j, numrho, adata, &loc_max, &loc_maxn);
+		UpdateAccumulator(i, j, numrho, dev_adata, dev_max_val, dev_max_n, adata, &loc_max, &loc_maxn);
 		if (loc_max > max_val)
 		{
 			max_val = loc_max;
 			max_n = loc_maxn;
 		}
 
+		// ---- CPU -----
 		//for (int n = 0; n < NUM_ANGLE; n++)
 		//{
 		//	int r = cvRound(j * hough_cos(n) + i * hough_sin(n));
@@ -233,6 +297,10 @@ void HoughLinesProbabilistic(cv::Mat& image, int threshold, int lineLength, int 
 			}
 		}
 	}
+
+	cudaFree(dev_adata);
+	cudaFree(dev_max_val);
+	cudaFree(dev_max_n);
 }
 
 int main()
@@ -265,8 +333,14 @@ int main()
 	cv::imwrite("canny.png", canny);
 
 	// Run probabilistic hough line detection
+	auto start = std::chrono::high_resolution_clock::now();
+
 	std::vector<cv::Vec4i> lines;
-	HoughLinesProbabilistic(canny, 80, 200, 10, lines, 10);
+	HoughLinesProbabilistic_v1(canny, 80, 200, 10, lines, 10);
+
+	auto end = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::ratio<1, 1000>> time = end - start;
+	std::cout << "Execution time: " << time.count() << "ms" << std::endl;
 
 	// Draw lines detected 
 	for (int k = 0; k < lines.size(); k++)
