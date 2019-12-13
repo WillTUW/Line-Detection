@@ -54,6 +54,7 @@ __global__ void GPU_UpdateAccumulatorAll(int count, int *queueXY, int numrho, sh
 	smax_n[n] = n;
 	__syncthreads();
 
+#pragma unroll
 	for (int s = 1; s < NUM_ANGLE; s *= 2)
 	{
 		int index = (2 * s) * n; // Next
@@ -146,8 +147,8 @@ void UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, sho
 	GPU_UpdateAccumulatorAll <<< count, NUM_ANGLE, 1, stream2 >>> (count, dev_queuexy, numrho, dev_adata, dev_max_val, dev_max_n);
 
 	cudaMemcpyAsync(adata, dev_adata, NUM_ANGLE * numrho * sizeof(short), cudaMemcpyDeviceToHost, stream1);
-	cudaMemcpyAsync(max_val, dev_max_val, count * sizeof(int), cudaMemcpyDeviceToHost, stream1);
-	cudaMemcpyAsync(max_n, dev_max_n, count * sizeof(int), cudaMemcpyDeviceToHost, stream1);
+	cudaMemcpyAsync(max_val, dev_max_val, count * sizeof(short), cudaMemcpyDeviceToHost, stream1);
+	cudaMemcpyAsync(max_n, dev_max_n, count * sizeof(short), cudaMemcpyDeviceToHost, stream1);
 
 	cudaFree(dev_queuexy);
 	cudaFree(dev_adata);
