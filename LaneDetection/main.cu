@@ -913,64 +913,6 @@ void HoughLines_CPU(cv::Mat& image, std::vector<cv::Vec4i>& lines)
 	}
 }
 
-// Saves the accumulator matrix
-void SaveAccumulatorMatrix(const cv::String &filename)
-{
-	cv::Mat image = cv::imread(filename);
-	if (image.empty())
-	{
-		return;
-	}
-
-	cv::Point pt;
-	cv::RNG rng((uint64)-1);
-
-	CV_Assert(image.type() == CV_8UC1);
-
-	int width = image.cols;
-	int height = image.rows;
-
-	int numrho = cvRound(((width + height) * 2 + 1) / RHO);
-
-	cv::Mat accum = cv::Mat::zeros(NUM_ANGLE, numrho, CV_16SC1);
-	cv::Mat mask(height, width, CV_8UC1);
-
-	uchar* mdata0 = mask.ptr();
-	std::vector<int> nzlocXY;
-
-	// stage 1. collect non-zero image points
-	for (pt.y = 0; pt.y < height; pt.y++)
-	{
-		const uchar* data = image.ptr(pt.y);
-		uchar* mdata = mask.ptr(pt.y);
-		for (pt.x = 0; pt.x < width; pt.x++)
-		{
-			if (data[pt.x])
-			{
-				mdata[pt.x] = (uchar)1;
-				nzlocXY.push_back(pt.x << 16 | pt.y);
-			}
-			else
-			{
-				mdata[pt.x] = 0;
-			}
-		}
-	}
-
-	int count = (int)nzlocXY.size();
-	if (count == 0)
-	{
-		return;
-	}
-
-	short* adata = accum.ptr<short>();
-
-	// stage 2. accumulator area
-	short* maxNs = new short[count];
-	short* maxVals = new short[count];
-	UpdateAccumulatorAll(count, &nzlocXY[0], numrho, adata, maxVals, maxNs);
-}
-
 // Filters an image based upon a region of interest
 cv::Mat filter_roi(cv::Mat &input, cv::Point top_left, cv::Point top_right, cv::Point bot_left, cv::Point bot_right) {
 	cv::Point corners[1][4];
@@ -997,6 +939,10 @@ cv::Mat filter_roi(cv::Mat &input, cv::Point top_left, cv::Point top_right, cv::
 cv::Mat DoPreprocessing(const cv::Mat &input)
 {
 	const int ddepth = CV_16S;
+	if (input.empty())
+	{
+		return input;
+	}
 
 	// Remove noise by blurring with a Gaussian filter
 	cv::Mat srcBlurred;
@@ -1015,6 +961,54 @@ cv::Mat DoPreprocessing(const cv::Mat &input)
 	cv::Mat canny;
 	cv::Canny(grad_x, grad_y, canny, 100, 150);
 	return canny;
+}
+
+// Saves the accumulator matrix
+void SaveAccumulatorMatrix(const cv::String &filename)
+{
+	cv::Mat image = DoPreprocessing(cv::imread(filename));
+	if (image.empty())
+	{
+		return;
+	}
+
+	cv::Point pt;
+	CV_Assert(image.type() == CV_8UC1);
+
+	int width = image.cols;
+	int height = image.rows;
+
+	int numrho = cvRound(((width + height) * 2 + 1) / RHO);
+
+	cv::Mat accum = cv::Mat::zeros(NUM_ANGLE, numrho, CV_16SC1);
+	std::vector<int> nzlocXY;
+
+	// stage 1. collect non-zero image points
+	for (pt.y = 0; pt.y < height; pt.y++)
+	{
+		const uchar* data = image.ptr(pt.y);
+		for (pt.x = 0; pt.x < width; pt.x++)
+		{
+			if (data[pt.x])
+			{
+				nzlocXY.push_back(pt.x << 16 | pt.y);
+			}
+		}
+	}
+
+	int count = (int)nzlocXY.size();
+	if (count == 0)
+	{
+		return;
+	}
+
+	short* adata = accum.ptr<short>();
+
+	// stage 2. accumulator area
+	short* maxNs = new short[count];
+	short* maxVals = new short[count];
+	UpdateAccumulatorAll(count, &nzlocXY[0], numrho, adata, maxVals, maxNs);
+	cv::imwrite("accumulator.png", accum);
 }
 
 // Runs a side-by-side comparison of the GPU and CPU implementation of the hough lines
@@ -1190,9 +1184,12 @@ int main()
 	//of kicking off context creation and initialization.
 	cudaFree(0);
 
-	// Process video
+	// - Process video
 	//ProcessVideo("highway.mp4");
 
-	// Do comparison
+	// - Do comparison
 	//DoComparison("test.png");
+
+	// - Save accumulation matrix
+	//SaveAccumulatorMatrix("hill.jpg");
 }
