@@ -12,7 +12,7 @@
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{01086430-5F6D-4ABC-89F2-F7DC00AA1A81}</ProjectGuid>
-    <RootNamespace>HoughTransform</RootNamespace>
+    <RootNamespace>LaneDetection</RootNamespace>
     <WindowsTargetPlatformVersion>10.0.18362.0</WindowsTargetPlatformVersion>
     <ProjectName>LaneDetection</ProjectName>
   </PropertyGroup>

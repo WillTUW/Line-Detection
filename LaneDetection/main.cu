@@ -40,6 +40,9 @@ constexpr auto LINE_GAP = 10;
 constexpr auto LINE_MAX = 20;
 constexpr auto LINE_THRESH = 100;
 
+// parameters for preprocessing
+constexpr auto KSIZE = 1;
+
 // Final kernel: Updates entire accumulator for all points
 __global__ void GPU_UpdateAccumulatorAll(int count, int *queueXY, int numrho, short* adata, short* max_val, short* max_n)
 {
@@ -910,102 +913,62 @@ void HoughLines_CPU(cv::Mat& image, std::vector<cv::Vec4i>& lines)
 	}
 }
 
-// Runs a side-by-side comparison of the GPU and CPU implementation of the hough lines
-void DoComparison(cv::Mat srcImage, cv::Mat roiImage)
+// Saves the accumulator matrix
+void SaveAccumulatorMatrix(const cv::String &filename)
 {
-	const int ddepth = CV_16S;
-	const int ksize = 5;
-
-	// remove these variables if better filtering is applied
-	// used to filter out boundry lines
-	const int outerboundL = BOUND_OFFSET;
-	const int outerboundR = srcImage.size().width - BOUND_OFFSET;
-	const int outerboundT = BOUND_OFFSET;
-	const int outerboundB = srcImage.size().height - BOUND_OFFSET;
-
-	// Remove noise by blurring with a Gaussian filter
-	cv::Mat srcBlurred;
-	GaussianBlur(roiImage, srcBlurred, cv::Size(ksize, ksize), 2, 2, cv::BORDER_DEFAULT);
-
-	// Convert the image to grayscale
-	cv::Mat srcGray;
-	cvtColor(srcBlurred, srcGray, cv::COLOR_BGR2GRAY);
-
-	// Run sobel edge detection
-	cv::Mat grad_x, grad_y;
-	cv::Sobel(srcGray, grad_x, ddepth, 1, 0, ksize, cv::BORDER_DEFAULT);
-	cv::Sobel(srcGray, grad_y, ddepth, 0, 1, ksize, cv::BORDER_DEFAULT);
-
-	// Run canny edge detection
-	cv::Mat canny;
-	cv::Canny(grad_x, grad_y, canny, 100, 150);
-	cv::imwrite("canny.png", canny);
-
-	cv::Mat srcCopy = srcImage.clone();
-
-	// Run GPU probabilistic hough line detection
-	auto gpuStart = std::chrono::high_resolution_clock::now();
-
-	std::vector<cv::Vec4i> gpu_lines;
-	HoughLines_GPU_v2Fast(canny, gpu_lines);
-
-	auto gpuEnd = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double, std::ratio<1, 1000>> gpu_time = gpuEnd - gpuStart;
-	std::cout << "(GPU) Image Execution time: " << gpu_time.count() << "ms" << std::endl;
-
-	// Draw lines detected 
-	for (int k = 0; k < gpu_lines.size(); k++)
+	cv::Mat image = cv::imread(filename);
+	if (image.empty())
 	{
-		// this filters out border lines, probably not the best approach
-		// remove the if in the event of a better filter
-		if (
-			!(((outerboundT > gpu_lines[k][1]
-				|| gpu_lines[k][1] > outerboundB) &&
-				(outerboundT > gpu_lines[k][3]
-					|| gpu_lines[k][3] > outerboundB)) ||
-					((outerboundL > gpu_lines[k][0]
-						|| gpu_lines[k][0] > outerboundR) &&
-						(outerboundL > gpu_lines[k][2]
-							|| gpu_lines[k][2] > outerboundR)))
-			)
-			cv::line(srcImage, cv::Point(gpu_lines[k][0], gpu_lines[k][1]), cv::Point(gpu_lines[k][2],
-				gpu_lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+		return;
 	}
 
-	// Output image
-	cv::imwrite("gpu_detected.png", srcImage);
+	cv::Point pt;
+	cv::RNG rng((uint64)-1);
 
-	// Run CPU probabilistic hough line detection
-	auto cpuStart = std::chrono::high_resolution_clock::now();
+	CV_Assert(image.type() == CV_8UC1);
 
-	std::vector<cv::Vec4i> cpu_lines;
-	HoughLines_CPU(canny, cpu_lines);
+	int width = image.cols;
+	int height = image.rows;
 
-	auto cpuEnd = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double, std::ratio<1, 1000>> cpu_time = cpuEnd - cpuStart;
-	std::cout << "(CPU) Image Execution time: " << cpu_time.count() << "ms" << std::endl;
+	int numrho = cvRound(((width + height) * 2 + 1) / RHO);
 
-	// Draw lines detected 
-	for (int k = 0; k < cpu_lines.size(); k++)
+	cv::Mat accum = cv::Mat::zeros(NUM_ANGLE, numrho, CV_16SC1);
+	cv::Mat mask(height, width, CV_8UC1);
+
+	uchar* mdata0 = mask.ptr();
+	std::vector<int> nzlocXY;
+
+	// stage 1. collect non-zero image points
+	for (pt.y = 0; pt.y < height; pt.y++)
 	{
-		// this filters out border lines, probably not the best approach
-		// remove the if in the event of a better filter
-		if (
-			!(((outerboundT > gpu_lines[k][1]
-				|| gpu_lines[k][1] > outerboundB) &&
-				(outerboundT > gpu_lines[k][3]
-					|| gpu_lines[k][3] > outerboundB)) ||
-					((outerboundL > gpu_lines[k][0]
-						|| gpu_lines[k][0] > outerboundR) &&
-						(outerboundL > gpu_lines[k][2]
-							|| gpu_lines[k][2] > outerboundR)))
-			)
-			cv::line(srcCopy, cv::Point(cpu_lines[k][0], cpu_lines[k][1]), cv::Point(cpu_lines[k][2],
-				cpu_lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+		const uchar* data = image.ptr(pt.y);
+		uchar* mdata = mask.ptr(pt.y);
+		for (pt.x = 0; pt.x < width; pt.x++)
+		{
+			if (data[pt.x])
+			{
+				mdata[pt.x] = (uchar)1;
+				nzlocXY.push_back(pt.x << 16 | pt.y);
+			}
+			else
+			{
+				mdata[pt.x] = 0;
+			}
+		}
 	}
 
-	// Output image
-	cv::imwrite("cpu_detected.png", srcCopy);
+	int count = (int)nzlocXY.size();
+	if (count == 0)
+	{
+		return;
+	}
+
+	short* adata = accum.ptr<short>();
+
+	// stage 2. accumulator area
+	short* maxNs = new short[count];
+	short* maxVals = new short[count];
+	UpdateAccumulatorAll(count, &nzlocXY[0], numrho, adata, maxVals, maxNs);
 }
 
 // Filters an image based upon a region of interest
@@ -1030,38 +993,14 @@ cv::Mat filter_roi(cv::Mat &input, cv::Point top_left, cv::Point top_right, cv::
 	return output;
 }
 
-// Runs a side-by-side comparison of the GPU and CPU implementation of the hough lines
-// Given a filename for the source image
-void DoComparison(std::string filename)
+// Preprocesses an image
+cv::Mat DoPreprocessing(const cv::Mat &input)
 {
-	// read image
-	cv::Mat srcImage = cv::imread("highway.jpg"); // image
-	if (srcImage.empty())
-	{
-		std::cout << "Cannot open the image file" << std::endl;
-		return;
-	}
-
-	// Get region of interest
-	cv::Mat roi = filter_roi(srcImage, cv::Point(2, 2),
-		cv::Point(srcImage.size().width - 2, 2),
-		cv::Point(2, srcImage.size().height - 2),
-		cv::Point(srcImage.size().width - 2, srcImage.size().height - 2));
-
-	// Run comparison
-	DoComparison(srcImage, roi);
-}
-
-// Processes and saves the detected lines for an image
-void SaveHoughLines(cv::Mat frameImage, cv::Mat roiImage, cv::String filename)
-{
-	int h = frameImage.cols;
 	const int ddepth = CV_16S;
-	const int ksize = 1;
 
 	// Remove noise by blurring with a Gaussian filter
 	cv::Mat srcBlurred;
-	GaussianBlur(roiImage, srcBlurred, cv::Size(ksize, ksize), 2, 2, cv::BORDER_DEFAULT);
+	GaussianBlur(input, srcBlurred, cv::Size(KSIZE, KSIZE), 2, 2, cv::BORDER_DEFAULT);
 
 	// Convert the image to grayscale
 	cv::Mat srcGray;
@@ -1069,15 +1008,93 @@ void SaveHoughLines(cv::Mat frameImage, cv::Mat roiImage, cv::String filename)
 
 	// Run sobel edge detection
 	cv::Mat grad_x, grad_y;
-	cv::Sobel(srcGray, grad_x, ddepth, 1, 0, ksize, cv::BORDER_DEFAULT);
-	cv::Sobel(srcGray, grad_y, ddepth, 0, 1, ksize, cv::BORDER_DEFAULT);
+	cv::Sobel(srcGray, grad_x, ddepth, 1, 0, KSIZE, cv::BORDER_DEFAULT);
+	cv::Sobel(srcGray, grad_y, ddepth, 0, 1, KSIZE, cv::BORDER_DEFAULT);
 
 	// Run canny edge detection
 	cv::Mat canny;
 	cv::Canny(grad_x, grad_y, canny, 100, 150);
+	return canny;
+}
+
+// Runs a side-by-side comparison of the GPU and CPU implementation of the hough lines
+void DoComparison(const cv::Mat &srcImage0)
+{
+	cv::Mat srcImage1 = srcImage0.clone();
+
+	cv::Mat preprocessed0 = DoPreprocessing(srcImage0);
+	cv::Mat preprocessed1 = preprocessed0.clone();
+
+	// Run GPU probabilistic hough line detection
+	auto gpuStart = std::chrono::high_resolution_clock::now();
 
 	std::vector<cv::Vec4i> gpu_lines;
-	HoughLines_GPU_v2Fast(canny, gpu_lines);
+	HoughLines_GPU_v2Fast(preprocessed0, gpu_lines);
+
+	auto gpuEnd = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::ratio<1, 1000>> gpu_time = gpuEnd - gpuStart;
+	std::cout << "(GPU) Image Execution time: " << gpu_time.count() << "ms" << std::endl;
+
+	// Draw lines detected 
+	for (int k = 0; k < gpu_lines.size(); k++)
+	{
+		// this filters out border lines, probably not the best approach
+		// remove the if in the event of a better filter
+		cv::line(srcImage0, cv::Point(gpu_lines[k][0], gpu_lines[k][1]), cv::Point(gpu_lines[k][2],
+			gpu_lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+	}
+
+	// Output image
+	cv::imwrite("gpu_detected.png", srcImage0);
+
+	// Run CPU probabilistic hough line detection
+	auto cpuStart = std::chrono::high_resolution_clock::now();
+
+	std::vector<cv::Vec4i> cpu_lines;
+	HoughLines_CPU(preprocessed1, cpu_lines);
+
+	auto cpuEnd = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::ratio<1, 1000>> cpu_time = cpuEnd - cpuStart;
+	std::cout << "(CPU) Image Execution time: " << cpu_time.count() << "ms" << std::endl;
+
+	// Draw lines detected 
+	for (int k = 0; k < cpu_lines.size(); k++)
+	{
+		// this filters out border lines, probably not the best approach
+		// remove the if in the event of a better filter
+		cv::line(srcImage1, cv::Point(cpu_lines[k][0], cpu_lines[k][1]), cv::Point(cpu_lines[k][2],
+			cpu_lines[k][3]), cv::Scalar(0, 0, 255), 3, 8);
+	}
+
+	// Output image
+	cv::imwrite("cpu_detected.png", srcImage1);
+}
+
+// Runs a side-by-side comparison of the GPU and CPU implementation of the hough lines
+// Given a filename for the source image
+void DoComparison(const std::string &filename)
+{
+	// read image
+	cv::Mat srcImage = cv::imread(filename); // image
+	if (srcImage.empty())
+	{
+		std::cout << "Cannot open the image file" << std::endl;
+		return;
+	}
+
+	// Run comparison
+	DoComparison(srcImage);
+}
+
+// Processes and saves the detected lines for an image
+void SaveHoughLines(const cv::Mat &frameImage, const cv::Mat &roiImage, const cv::String &filename)
+{
+	int h = frameImage.cols;
+	
+	cv::Mat preprocessed = DoPreprocessing(roiImage);
+
+	std::vector<cv::Vec4i> gpu_lines;
+	HoughLines_GPU_v2Fast(preprocessed, gpu_lines);
 
 	// remove these variables if better filtering is applied
 	// used to filter out boundry lines
@@ -1110,7 +1127,7 @@ void SaveHoughLines(cv::Mat frameImage, cv::Mat roiImage, cv::String filename)
 }
 
 // Processes a video and saves all processed frames
-void ProcessVideo(std::string filename)
+void ProcessVideo(const std::string &filename)
 {
 	// video test
 	cv::VideoCapture cap("highway.mp4"); // video
@@ -1174,5 +1191,8 @@ int main()
 	cudaFree(0);
 
 	// Process video
-	ProcessVideo("highway.mp4");
+	//ProcessVideo("highway.mp4");
+
+	// Do comparison
+	//DoComparison("test.png");
 }
